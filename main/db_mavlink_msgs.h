@@ -20,15 +20,15 @@
 #ifndef DB_ESP32_DB_MAVLINK_MSGS_H
 #define DB_ESP32_DB_MAVLINK_MSGS_H
 
-#include <stdint.h>
-#include "fastmavlink/c_library/common/common.h"
 #include "db_serial.h"
+#include "fastmavlink/c_library/common/common.h"
+#include <stdint.h>
 
-//typedef struct  {
-//    char mavlink_parameter_name[16];
-//    void* parameter_internal_variable;
-//    MAV_PARAM_TYPE mavlink_parameter_data_type;
-//} db_internal_parameters_t;
+// typedef struct  {
+//     char mavlink_parameter_name[16];
+//     void* parameter_internal_variable;
+//     MAV_PARAM_TYPE mavlink_parameter_data_type;
+// } db_internal_parameters_t;
 
 uint8_t db_get_mav_comp_id();
 uint8_t db_get_mav_sys_id();
@@ -45,4 +45,4 @@ void handle_mavlink_message(fmav_message_t *new_msg, int *tcp_clients, udp_conn_
                             fmav_status_t *fmav_status,
                             enum DB_MAVLINK_DATA_ORIGIN origin);
 
-#endif //DB_ESP32_DB_MAVLINK_MSGS_H
+#endif // DB_ESP32_DB_MAVLINK_MSGS_H
