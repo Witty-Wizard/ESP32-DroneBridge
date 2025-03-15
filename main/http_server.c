@@ -17,16 +17,35 @@
  *
  */
 
-#include "http_server.h"
+/**************************************************************************
+ * Standard C Library Headers
+ *************************************************************************/
 #include <string.h>
 #include <fcntl.h>
-#include <lwip/sockets.h>
+
+/**************************************************************************
+ * ESP-IDF System Headers
+ *************************************************************************/
+#include <esp_system.h>
 #include <esp_chip_info.h>
+#include <esp_log.h>
+#include <esp_vfs.h>
+
+/**************************************************************************
+ * LWIP (Lightweight IP) Headers
+ *************************************************************************/
+#include <lwip/sockets.h>
+
+/**************************************************************************
+ * HTTP Server & JSON Handling Headers
+ *************************************************************************/
 #include "esp_http_server.h"
-#include "esp_system.h"
-#include "esp_log.h"
-#include "esp_vfs.h"
+#include "http_server.h"
 #include "cJSON.h"
+
+/**************************************************************************
+ * Other Project-Specific Headers
+ *************************************************************************/
 #include "globals.h"
 #include "main.h"
 #include "db_serial.h"
