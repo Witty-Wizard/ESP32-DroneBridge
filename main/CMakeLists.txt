@@ -9,6 +9,7 @@ idf_component_register(SRCS
     db_serial.c
     db_mavlink_msgs.c
     db_ble.c
+    ota.c
     INCLUDE_DIRS ".")
 
 if(CONFIG_WEB_DEPLOY_SF)

@@ -71,6 +71,7 @@
 #include "globals.h"
 #include "iot_button.h"
 #include "main.h"
+#include "ota.h"
 
 #define NVS_NAMESPACE "settings"
 
