@@ -22,6 +22,18 @@
 #ifndef DB_ESP32_HTTP_SERVER_NEW_H
 #define DB_ESP32_HTTP_SERVER_NEW_H
 
-esp_err_t start_rest_server(const char *base_path);
+/******************************************************************************
+ * Public function declaration
+ ******************************************************************************/
+
+/******************************************************************************
+ * @brief Function to start the HTTP server for web UI
+ * 
+ * @param base_path string to the base path for the server
+ * @return esp_err_t
+ * - ESP_OK on success
+ * - ESP_FAIL on failure
+ ******************************************************************************/
+esp_err_t db_start_rest_server(const char *base_path);
 
 #endif //DB_ESP32_HTTP_SERVER_NEW_H

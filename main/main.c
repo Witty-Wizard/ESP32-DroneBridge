@@ -708,7 +708,7 @@ void app_main() {
   if (DB_PARAM_RADIO_MODE != DB_WIFI_MODE_ESPNOW_AIR && DB_PARAM_RADIO_MODE != DB_WIFI_MODE_ESPNOW_GND &&
   DB_PARAM_RADIO_MODE != DB_WIFI_MODE_AP_LR && DB_PARAM_RADIO_MODE != DB_BLUETOOTH_MODE) {
     // no need to start these services - won`t be available anyway - safe the resources
-    ESP_ERROR_CHECK(start_rest_server(CONFIG_WEB_MOUNT_POINT));
+    ESP_ERROR_CHECK(db_start_rest_server(CONFIG_WEB_MOUNT_POINT));
     ESP_LOGI(TAG, "Rest Server started");
     // Disable legacy support for DroneBridge communication module - no use case for DroneBridge for ESP32
     // communication_module();
