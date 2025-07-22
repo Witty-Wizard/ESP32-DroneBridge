@@ -268,7 +268,7 @@ settings_clients_udp_post(httpd_req_t *req)
   // udp_conn_list is initialized as the very first thing during startup - we
   // expect it to be there
   bool success =
-    add_to_known_udp_clients(udp_conn_list, new_udp_client, save_to_nvm);
+    db_add_to_known_udp_clients(udp_conn_list, new_udp_client, save_to_nvm);
 
   // Clean up
   cJSON_Delete(root);
