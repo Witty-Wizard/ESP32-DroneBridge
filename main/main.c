@@ -181,7 +181,7 @@ wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
              event->aid);
     struct db_udp_client_t db_udp_client;
     memcpy(db_udp_client.mac, event->mac, sizeof(db_udp_client.mac));
-    remove_from_known_udp_clients(udp_conn_list, db_udp_client);
+    db_remove_from_known_udp_clients(udp_conn_list, db_udp_client);
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_ap_get_sta_list(
       &wifi_sta_list)); // update list of connected stations
   }
@@ -208,7 +208,7 @@ wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
     db_udp_client.udp_client.sin_len = 16;
     db_udp_client.udp_client.sin_addr.s_addr = event->ip.addr;
     memcpy(db_udp_client.mac, event->mac, sizeof(db_udp_client.mac));
-    add_to_known_udp_clients(udp_conn_list, db_udp_client, false);
+    db_add_to_known_udp_clients(udp_conn_list, db_udp_client, false);
   }
   // Wifi client mode events
   if(event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
@@ -761,7 +761,7 @@ db_read_settings_nvs()
         .udp_client = new_sockaddr, .mac = { 0, 0, 0, 0, 0, 0 } // dummy MAC
       };
       bool save_to_nvm = false; // no need to save it to NVM again
-      add_to_known_udp_clients(udp_conn_list, new_udp_client, save_to_nvm);
+      db_add_to_known_udp_clients(udp_conn_list, new_udp_client, save_to_nvm);
     }
     else {
       // no saved UDP client - do nothing
@@ -886,7 +886,7 @@ app_main()
 {
   db_param_init_parameters();
   udp_conn_list =
-    udp_client_list_create(); // http server functions and db_read_settings_nvs
+    db_udp_client_list_create(); // http server functions and db_read_settings_nvs
                               // expect the list to exist
   esp_err_t ret = nvs_flash_init();
   if(ret == ESP_ERR_NVS_NO_FREE_PAGES) {
