@@ -376,7 +376,7 @@ handle_mavlink_message(fmav_message_t *new_msg, int *tcp_clients,
           ESP_LOGD(TAG, "Sending back heartbeat via serial link to GCS");
           // In AP LR mode and in ESP-NOW GND mode the heartbeat has to be
           // emitted via serial directly to the GCS
-          write_to_serial(buff, length);
+          db_write_to_serial(buff, length);
         }
         else {
           ESP_LOGW(TAG,

@@ -852,7 +852,7 @@ db_jtag_serial_info_print()
 {
   uint8_t buffer[512];
   const int len = db_param_print_values_to_buffer(buffer);
-  write_to_serial(buffer, len);
+  db_write_to_serial(buffer, len);
 }
 
 /**
