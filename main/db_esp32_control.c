@@ -619,7 +619,7 @@ control_module_esp_now()
       default:
         // No parsing with any other protocol - transparent here - just pass
         // through
-        write_to_serial(db_espnow_uart_evt.data, db_espnow_uart_evt.data_len);
+        db_write_to_serial(db_espnow_uart_evt.data, db_espnow_uart_evt.data_len);
         break;
       }
 
@@ -856,7 +856,7 @@ control_module_udp_tcp()
 
           default:
             // No parsing with any other protocol - transparent here
-            write_to_serial(tcp_client_buffer, recv_length);
+            db_write_to_serial(tcp_client_buffer, recv_length);
             break;
           }
         }
@@ -902,7 +902,7 @@ control_module_udp_tcp()
 
       default:
         // No parsing with any other protocol - transparent here
-        write_to_serial(udp_buffer, recv_length);
+        db_write_to_serial(udp_buffer, recv_length);
         break;
       }
 
@@ -931,7 +931,7 @@ control_module_udp_tcp()
                              &udp_socklen);
       if(recv_length > 0) {
         // no parsing - transparent here
-        write_to_serial(udp_buffer, recv_length);
+        db_write_to_serial(udp_buffer, recv_length);
         // add Skybrush server to known UDP target/distribution list
         add_to_known_udp_clients(udp_conn_list, new_db_udp_client, false);
       }
@@ -1055,7 +1055,7 @@ control_module_ble()
       else {
         // no parsing with any other protocol - transparent here - just pass
         // through
-        write_to_serial(bleData.data, bleData.data_len);
+        db_write_to_serial(bleData.data, bleData.data_len);
       }
       free(bleData.data);
     }
