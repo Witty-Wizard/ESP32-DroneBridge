@@ -310,7 +310,7 @@ settings_clients_clear_udp_get(httpd_req_t *req)
   ESP_LOGI(TAG, "Removed all UDP clients from list!");
   // Clear saved client as well. Pass any client since it will be ignored as
   // long as clear_client is set to true.
-  save_udp_client_to_nvm(&udp_conn_list->db_udp_clients[0], true);
+  db_save_udp_client_to_nvm(&udp_conn_list->db_udp_clients[0], true);
   return ESP_OK;
 }
 

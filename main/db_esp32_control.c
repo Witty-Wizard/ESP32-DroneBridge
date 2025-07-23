@@ -1008,7 +1008,7 @@ db_add_to_known_udp_clients(udp_conn_list_t *n_udp_conn_list,
            save_to_nvm);
   // save to memory
   if(save_to_nvm) {
-    save_udp_client_to_nvm(&new_db_udp_client, false);
+    db_save_udp_client_to_nvm(&new_db_udp_client, false);
   }
   else {
     // do not save to NVM
