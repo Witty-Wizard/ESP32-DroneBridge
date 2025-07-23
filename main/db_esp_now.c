@@ -1,4 +1,4 @@
-/*
+/******************************************************************************
  *   This file is part of DroneBridge: https://github.com/DroneBridge/ESP32
  *
  *   Copyright 2024 Wolfgang Christl
@@ -15,40 +15,61 @@
  *   See the License for the specific language governing permissions and
  *   limitations under the License.
  *
- */
+ ******************************************************************************/
 
+/******************************************************************************
+ * System & Standard Library Headers
+ ******************************************************************************/
+#include <string.h>
 #include <sys/cdefs.h>
-#include <esp_err.h>
+
+/******************************************************************************
+ * ESP-IDF Core APIs
+ ******************************************************************************/
 #include <esp_log.h>
+#include <esp_err.h>
 #include <esp_mac.h>
+#include <esp_crc.h>
+
+/******************************************************************************
+ * FreeRTOS
+ ******************************************************************************/
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/timers.h>
-#include <string.h>
-#include <esp_crc.h>
+
+/******************************************************************************
+ * mbedTLS
+ ******************************************************************************/
 #include <mbedtls/gcm.h>
 #include <mbedtls/md.h>
 #include <mbedtls/pkcs5.h>
-#include "db_esp_now.h"
 
+/******************************************************************************
+ * Project Headers
+ ******************************************************************************/
+#include "main.h"
+#include "globals.h"
+#include "espnow.h"
+#include "db_esp_now.h"
 #include <db_parameters.h>
 
-#include "globals.h"
-#include "main.h"
-#include "espnow.h"
-
+/******************************************************************************
+ * Macros
+ ******************************************************************************/
 #define TAG "DB_ESPNOW"
 
 const uint8_t BROADCAST_MAC[ESP_NOW_ETH_ALEN] = { 0xFF, 0xFF, 0xFF,
                                                   0xFF, 0xFF, 0xFF };
+
+/******************************************************************************
+ * Public Variables
+ ******************************************************************************/
 static QueueHandle_t
   db_espnow_send_recv_callback_queue; // Queue that contains ESP-NOW callback
                                       // results
-QueueHandle_t db_espnow_send_queue; // Queue that contains data to be sent via
-                                    // ESP-NOW (filled by control task)
-QueueHandle_t db_uart_write_queue; // Queue that contains data to be written to
-                                   // UART (filled by ESP-NOW task)
-db_esp_now_clients_list_t
+
+static db_esp_now_clients_list_t
   *db_esp_now_clients_list; // Local list of known ESP-NOW peers with the last
                             // RSSI value and noise floor and sequence number
 
@@ -59,9 +80,33 @@ static db_esp_now_packet_t db_esp_now_packet_global = {
   .db_esp_now_packet_header.packet_type = DB_ESP_NOW_PACKET_TYPE_DATA
 }; // make static so it is gets instanced only once
 
-mbedtls_gcm_context aes;
-uint8_t const db_esp_now_packet_header_len =
+static mbedtls_gcm_context aes;
+static const uint8_t db_esp_now_packet_header_len =
   sizeof(db_esp_now_packet_header_t);
+
+/******************************************************************************
+ * Public Variables
+ ******************************************************************************/
+QueueHandle_t db_espnow_send_queue; /**<  Queue that contains data to be sent
+                                     * via ESP-NOW (filled by control task) */
+QueueHandle_t db_uart_write_queue; /**<  Queue that contains data to be written
+                                    * to UART (filled by ESP-NOW task) */
+
+/******************************************************************************
+ * Private Function Declarations
+ ******************************************************************************/
+
+/******************************************************************************
+ * Checks whether the given MAC address is a broadcast address
+ *
+ * @param addr Pointer to the MAC address to check
+ * @return true if the address is a broadcast address, false otherwise
+ ******************************************************************************/
+static inline bool
+IS_BROADCAST_ADDR(const uint8_t *addr)
+{
+  return memcmp(addr, BROADCAST_MAC, ESP_NOW_ETH_ALEN) == 0;
+}
 
 /**
  * Generates a AES key from a password using pkcs5 - pbkdf2 and mbedTLS
@@ -71,7 +116,172 @@ uint8_t const db_esp_now_packet_header_len =
  * @param key Output buffer for the key
  * @param keylen Length of the aes key to be generated
  */
-void
+static void generate_pkcs5_key(const char *password, unsigned char *key,
+                               size_t keylen);
+
+/**
+ * Encrypts and authenticates a DroneBridge for ESP32 ESP-NOW packet with its
+ * payload using AES-GCM 256 Beware we are using the same key for both
+ * communication directions. Calls mbedtls_gcm_crypt_and_tag()
+ *
+ * @param db_esp_now_packet Packet containing payload data and header info. AES
+ * IV & TAG will be filled
+ * @param encrypt_payload_len Length of the to be encrypted data
+ * (db_esp_now_packet_protected_data)
+ * @return 0 on success, -1 in case of unknown error of
+ * mbedtls_gcm_crypt_and_tag or return value of mbedtls_gcm_crypt_and_tag
+ * payload is encrypted and part of the db_esp_now_packet
+ */
+static int encrypt_payload(db_esp_now_packet_t *db_esp_now_packet,
+                           uint8_t encrypt_payload_len);
+
+/**
+ * Decrypt the DroneBridge ESP-NOW packet payload and authenticate its content
+ * using AES-GCM 256
+ *
+ * @param db_esp_now_packet db_esp_now_packet_protected_data_t structure wth
+ * the data de decrypt inside
+ * @param decrypt_out_buffer Pointer to the out buffer for the decrypted data
+ * @param len_encrypted_data length of the buffer
+ * (db_esp_now_packet_protected_data)
+ * @return returns result of mbedtls_gcm_auth_decrypt e.g. 0 on success and
+ * valid data
+ */
+static int decrypt_payload(db_esp_now_packet_t *db_esp_now_packet,
+                           uint8_t *decrypt_out_buffer,
+                           uint8_t len_encrypted_data);
+
+/**
+ * Encrypts, authenticates and sends packet via ESP-NOW
+ * @param db_esp_now_packet Packet to send
+ * @param payload_length Value of payload_length_decrypted of db_esp_now_packet
+ * - saves us from creating a var inside the function
+ * @return false if no packet was sent, true if packet was sent (actual sending
+ * will be confirmed by the send-callback)
+ */
+static bool espnow_encrypt_auth_send(db_esp_now_packet_t *db_esp_now_packet,
+                                     const uint8_t payload_length);
+
+/**
+ * Tries to read one entry from the ESP-NOW send queue (mainly filled by the
+ * UART task) and sends the data via broadcast. Only call this function when
+ * the last ESP-NOW send callback has returned! Otherwise order of packets is
+ * not guaranteed
+ *
+ * @return false if no packet was sent, true if packet was sent (actual sending
+ * will be confirmed by the send-callback)
+ */
+static bool read_uart_queue_and_send();
+
+/**
+ * Add a new ESP-NOW broadcast peer to the list of known ESP-NOW peers. Checks
+ * if peer is already known based on MAC. List is then used to keep track of
+ * the RSSI, packet loss and signal quality on GND side.
+ *
+ * @param esp_now_clients List of broadcast peers (ESP-NOW) with their RSSI
+ * @param broadcast_peer_mac MAC address of a potentially new broadcast peer
+ * @return index of the peer inside the list or -1 in case of error e.g. if
+ * list is full or not initialized
+ */
+static int16_t update_peer_list(db_esp_now_clients_list_t *esp_now_clients,
+                                uint8_t broadcast_peer_mac[6]);
+
+/**
+ * Steps to process received ESPNOW data. ESP firmware ensures that only
+ * correct packets are forwarded to us
+ * 1. Decrypt & authenticate
+ * 2. Check if we know the client based on MAC - update rssi in case we are GND
+ * - AIR side only expects to only ever have on GND peer anyways
+ * 3. Check sequence number and if we are GND station then update lost packet
+ * count based on seq. numbers
+ * 4. Write payload to uart-queue so it can be processed by the control_espnow
+ * task
+ *
+ * @param data Received raw data via ESP-NOW
+ * @param data_len  Length of received data
+ * @param src_addr Source MAC address of the data
+ * @param rssi RSSI in dBm of this packet
+ */
+static void espnow_process_rcv_data(uint8_t *data, uint16_t data_len,
+                                    uint8_t *src_addr, int8_t rssi);
+
+/**
+ * ESP-NOW sending callback function is called in WiFi task.
+ * Do not do lengthy operations from this task. Instead, post necessary data to
+ * a queue and handle it from the control module task. Note that too short
+ * interval between sending two ESP-NOW data may lead to disorder of sending
+ * callback function. So, it is recommended that sending the next ESP-NOW data
+ * after the sending callback function of the previous sending has returned.
+ */
+static void espnow_send_callback(const uint8_t *mac_addr,
+                                 esp_now_send_status_t status);
+
+/**
+ * ESP-NOW receiving callback function is called in WiFi task. This is the
+ * entry point when new data is incoming. Do not do lengthy operations from
+ * this task. Instead, post necessary data to a queue and handle it from the
+ * control module task
+ */
+static void espnow_receive_callback(const esp_now_recv_info_t *recv_info,
+                                    const uint8_t *data, int len);
+
+/**
+ *  Init/Create structure containing all ESP-NOW broadcast connection quality
+ * information List is used to keep track of the RSSI and signal quality on GND
+ * side.
+ * @return Structure containing all ESP-NOW broadcast connection quality
+ * information
+ */
+static db_esp_now_clients_list_t *espnow_broadcast_peers_list_create();
+
+/**
+ * Destroy structure containing all ESP-NOW broadcast connection quality
+ * information
+ * @param db_esp_now_clients Structure containing all ESP-NOW broadcast
+ * connection quality information
+ */
+static void espnow_broadcast_peers_list_destroy(
+  db_esp_now_clients_list_t *esp_now_clients);
+
+/**
+ * Init mbedtls aes gcm mode and set encryption key based on the WiFi password
+ * specified by the user
+ * @param aes_key buffer for saving the generated aes key of len
+ * AES_256_KEY_BYTES
+ * @return result of mbedtls_gcm_setkey
+ */
+static int init_gcm_encryption_module(uint8_t *aes_key);
+/**
+ * @brief Deinitialise all espnow
+ */
+static void deinit_espnow_all();
+
+/**
+ * Init all relevant structures and Queues for ESP-NOW communication
+ * @return ESP_FAIL on failure or ESP_OK on success
+ */
+static esp_err_t db_espnow_init();
+
+/**
+ * Send ESP-NOW DroneBridge for ESP32 internal telemetry packet containing RSSI
+ * and noise floor info from GND to AIR. Used by AIR side to create a
+ * RADIO_STATUS MAVLink message sent to GCS.
+ * @return true when packet was scheduled for sending, false if it will not be
+ * sent
+ */
+static bool espnow_schedule_internal_telemetry_packet();
+
+/**
+ *  Task that handles all ESP-NOW related data processing. Reads ESP-NOW
+ * Callback-Queue, Reads ESP-NOW send queue and writes to UART-WRITE Queue.
+ */
+_Noreturn static void process_espnow_data();
+
+/******************************************************************************
+ * Private Function Definitions
+ ******************************************************************************/
+
+static void
 generate_pkcs5_key(const char *password, unsigned char *key, size_t keylen)
 {
   mbedtls_md_context_t mdctx;
@@ -131,22 +341,9 @@ generate_pkcs5_key(const char *password, unsigned char *key, size_t keylen)
   mbedtls_md_free(&mdctx);
 }
 
-/**
- * Encrypts and authenticates a DroneBridge for ESP32 ESP-NOW packet with its
- * payload using AES-GCM 256 Beware we are using the same key for both
- * communication directions. Calls mbedtls_gcm_crypt_and_tag()
- *
- * @param db_esp_now_packet Packet containing payload data and header info. AES
- * IV & TAG will be filled
- * @param encrypt_payload_len Length of the to be encrypted data
- * (db_esp_now_packet_protected_data)
- * @return 0 on success, -1 in case of unknown error of
- * mbedtls_gcm_crypt_and_tag or return value of mbedtls_gcm_crypt_and_tag
- * payload is encrypted and part of the db_esp_now_packet
- */
-int
-db_encrypt_payload(db_esp_now_packet_t *db_esp_now_packet,
-                   uint8_t encrypt_payload_len)
+static int
+encrypt_payload(db_esp_now_packet_t *db_esp_now_packet,
+                uint8_t encrypt_payload_len)
 {
   // Generate random IV - This is risky since (password+IV) shall never be
   // reused! Counter would secure for a single session but super unsecure with
@@ -181,21 +378,9 @@ db_encrypt_payload(db_esp_now_packet_t *db_esp_now_packet,
   }
 }
 
-/**
- * Decrypt the DroneBridge ESP-NOW packet payload and authenticate its content
- * using AES-GCM 256
- *
- * @param db_esp_now_packet db_esp_now_packet_protected_data_t structure wth
- * the data de decrypt inside
- * @param decrypt_out_buffer Pointer to the out buffer for the decrypted data
- * @param len_encrypted_data length of the buffer
- * (db_esp_now_packet_protected_data)
- * @return returns result of mbedtls_gcm_auth_decrypt e.g. 0 on success and
- * valid data
- */
-int
-db_decrypt_payload(db_esp_now_packet_t *db_esp_now_packet,
-                   uint8_t *decrypt_out_buffer, uint8_t len_encrypted_data)
+static int
+decrypt_payload(db_esp_now_packet_t *db_esp_now_packet,
+                uint8_t *decrypt_out_buffer, uint8_t len_encrypted_data)
 {
   int ret_decrypt = mbedtls_gcm_auth_decrypt(
     &aes,
@@ -227,17 +412,9 @@ db_decrypt_payload(db_esp_now_packet_t *db_esp_now_packet,
   return ret_decrypt;
 }
 
-/**
- * Encrypts, authenticates and sends packet via ESP-NOW
- * @param db_esp_now_packet Packet to send
- * @param payload_length Value of payload_length_decrypted of db_esp_now_packet
- * - saves us from creating a var inside the function
- * @return false if no packet was sent, true if packet was sent (actual sending
- * will be confirmed by the send-callback)
- */
-bool
-db_espnow_encrypt_auth_send(db_esp_now_packet_t *db_esp_now_packet,
-                            const uint8_t payload_length)
+static bool
+espnow_encrypt_auth_send(db_esp_now_packet_t *db_esp_now_packet,
+                         const uint8_t payload_length)
 {
   static int ret;
   static esp_err_t err;
@@ -245,7 +422,7 @@ db_espnow_encrypt_auth_send(db_esp_now_packet_t *db_esp_now_packet,
   // copy (payload_length) for sending the packet const uint8_t payload_length
   // =
   // db_esp_now_packet->db_esp_now_packet_protected_data.payload_length_decrypted;
-  ret = db_encrypt_payload(
+  ret = encrypt_payload(
     db_esp_now_packet,
     (*db_esp_now_packet)
         .db_esp_now_packet_protected_data.payload_length_decrypted +
@@ -268,24 +445,14 @@ db_espnow_encrypt_auth_send(db_esp_now_packet_t *db_esp_now_packet,
     }
   }
   else {
-    ESP_LOGE(TAG,
-             "db_encrypt_payload returned error code: %i, not sending packet",
-             ret);
+    ESP_LOGE(
+      TAG, "encrypt_payload returned error code: %i, not sending packet", ret);
     return false;
   }
 }
 
-/**
- * Tries to read one entry from the ESP-NOW send queue (mainly filled by the
- * UART task) and sends the data via broadcast. Only call this function when
- * the last ESP-NOW send callback has returned! Otherwise order of packets is
- * not guaranteed
- *
- * @return false if no packet was sent, true if packet was sent (actual sending
- * will be confirmed by the send-callback)
- */
-bool
-db_read_uart_queue_and_send()
+static bool
+read_uart_queue_and_send()
 {
   static db_espnow_queue_event_t evt;
   // Receive data from Queue that was put there by other tasks to be sent via
@@ -313,7 +480,7 @@ db_read_uart_queue_and_send()
            evt.data_len);
     free(evt.data);
     // Encrypt, authenticate and send packet
-    if(db_espnow_encrypt_auth_send(&db_esp_now_packet_global, evt.data_len)) {
+    if(espnow_encrypt_auth_send(&db_esp_now_packet_global, evt.data_len)) {
       // update sequence number for next packet
       if(db_esp_now_packet_global.db_esp_now_packet_header.seq_num <
          UINT32_MAX) {
@@ -342,17 +509,7 @@ db_read_uart_queue_and_send()
   return false;
 }
 
-/**
- * Add a new ESP-NOW broadcast peer to the list of known ESP-NOW peers. Checks
- * if peer is already known based on MAC. List is then used to keep track of
- * the RSSI, packet loss and signal quality on GND side.
- *
- * @param esp_now_clients List of broadcast peers (ESP-NOW) with their RSSI
- * @param broadcast_peer_mac MAC address of a potentially new broadcast peer
- * @return index of the peer inside the list or -1 in case of error e.g. if
- * list is full or not initialized
- */
-int16_t
+static int16_t
 update_peer_list(db_esp_now_clients_list_t *esp_now_clients,
                  uint8_t broadcast_peer_mac[6])
 {
@@ -386,25 +543,9 @@ update_peer_list(db_esp_now_clients_list_t *esp_now_clients,
   }
 }
 
-/**
- * Steps to process received ESPNOW data. ESP firmware ensures that only
- * correct packets are forwarded to us
- * 1. Decrypt & authenticate
- * 2. Check if we know the client based on MAC - update rssi in case we are GND
- * - AIR side only expects to only ever have on GND peer anyways
- * 3. Check sequence number and if we are GND station then update lost packet
- * count based on seq. numbers
- * 4. Write payload to uart-queue so it can be processed by the control_espnow
- * task
- *
- * @param data Received raw data via ESP-NOW
- * @param data_len  Length of received data
- * @param src_addr Source MAC address of the data
- * @param rssi RSSI in dBm of this packet
- */
-void
-db_espnow_process_rcv_data(uint8_t *data, uint16_t data_len, uint8_t *src_addr,
-                           int8_t rssi)
+static void
+espnow_process_rcv_data(uint8_t *data, uint16_t data_len, uint8_t *src_addr,
+                        int8_t rssi)
 {
   db_esp_now_packet_t *db_esp_now_packet = (db_esp_now_packet_t *)data;
   uint8_t len_payload =
@@ -412,8 +553,7 @@ db_espnow_process_rcv_data(uint8_t *data, uint16_t data_len, uint8_t *src_addr,
   uint8_t db_decrypted_data[len_payload];
 
   /* Decrypt and authenticate packet - only then process its contents */
-  if(db_decrypt_payload(db_esp_now_packet, db_decrypted_data, len_payload) ==
-     0) {
+  if(decrypt_payload(db_esp_now_packet, db_decrypted_data, len_payload) == 0) {
     /* Check if we know that peer already */
     int16_t peer_index = update_peer_list(db_esp_now_clients_list, src_addr);
     if(peer_index != -1) {
@@ -518,16 +658,8 @@ db_espnow_process_rcv_data(uint8_t *data, uint16_t data_len, uint8_t *src_addr,
   }
 }
 
-/**
- * ESP-NOW sending callback function is called in WiFi task.
- * Do not do lengthy operations from this task. Instead, post necessary data to
- * a queue and handle it from the control module task. Note that too short
- * interval between sending two ESP-NOW data may lead to disorder of sending
- * callback function. So, it is recommended that sending the next ESP-NOW data
- * after the sending callback function of the previous sending has returned.
- */
 static void
-db_espnow_send_callback(const uint8_t *mac_addr, esp_now_send_status_t status)
+espnow_send_callback(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
   if(mac_addr == NULL) {
     ESP_LOGE(TAG, "Send callback arg error");
@@ -558,15 +690,9 @@ db_espnow_send_callback(const uint8_t *mac_addr, esp_now_send_status_t status)
   }
 }
 
-/**
- * ESP-NOW receiving callback function is called in WiFi task. This is the
- * entry point when new data is incoming. Do not do lengthy operations from
- * this task. Instead, post necessary data to a queue and handle it from the
- * control module task
- */
 static void
-db_espnow_receive_callback(const esp_now_recv_info_t *recv_info,
-                           const uint8_t *data, int len)
+espnow_receive_callback(const esp_now_recv_info_t *recv_info,
+                        const uint8_t *data, int len)
 {
   db_espnow_event_t evt;
   db_espnow_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
@@ -633,15 +759,8 @@ db_espnow_receive_callback(const esp_now_recv_info_t *recv_info,
   }
 }
 
-/**
- *  Init/Create structure containing all ESP-NOW broadcast connection quality
- * information List is used to keep track of the RSSI and signal quality on GND
- * side.
- * @return Structure containing all ESP-NOW broadcast connection quality
- * information
- */
-db_esp_now_clients_list_t *
-db_espnow_broadcast_peers_list_create()
+static db_esp_now_clients_list_t *
+espnow_broadcast_peers_list_create()
 {
   db_esp_now_clients_list_t *client_list =
     malloc(sizeof(db_esp_now_clients_list_t)); // Allocate memory for the list
@@ -652,15 +771,8 @@ db_espnow_broadcast_peers_list_create()
   return client_list;    // Return the pointer to the list
 }
 
-/**
- * Destroy structure containing all ESP-NOW broadcast connection quality
- * information
- * @param db_esp_now_clients Structure containing all ESP-NOW broadcast
- * connection quality information
- */
-void
-db_espnow_broadcast_peers_list_destroy(
-  db_esp_now_clients_list_t *esp_now_clients)
+static void
+espnow_broadcast_peers_list_destroy(db_esp_now_clients_list_t *esp_now_clients)
 {
   if(esp_now_clients == NULL) { // Check if the list is NULL
     return;                     // Do nothing
@@ -668,14 +780,7 @@ db_espnow_broadcast_peers_list_destroy(
   free(esp_now_clients); // Free the list
 }
 
-/**
- * Init mbedtls aes gcm mode and set encryption key based on the WiFi password
- * specified by the user
- * @param aes_key buffer for saving the generated aes key of len
- * AES_256_KEY_BYTES
- * @return result of mbedtls_gcm_setkey
- */
-int
+static int
 init_gcm_encryption_module(uint8_t *aes_key)
 {
   mbedtls_gcm_init(&aes);
@@ -690,7 +795,7 @@ init_gcm_encryption_module(uint8_t *aes_key)
   return ret;
 }
 
-void
+static void
 deinit_espnow_all()
 {
   ESP_LOGW(TAG, "De init ESPNOW incl. Queues & AES");
@@ -702,19 +807,15 @@ deinit_espnow_all()
   vSemaphoreDelete(
     db_uart_write_queue); // ToDo: Check if that is a good idea since control
                           // task might be using it
-  db_espnow_broadcast_peers_list_destroy(db_esp_now_clients_list);
+  espnow_broadcast_peers_list_destroy(db_esp_now_clients_list);
   esp_now_deinit();
 }
 
-/**
- * Init all relevant structures and Queues for ESP-NOW communication
- * @return ESP_FAIL on failure or ESP_OK on success
- */
-esp_err_t
+static esp_err_t
 db_espnow_init()
 {
   ESP_LOGI(TAG, "Initializing ESP-NOW parameters");
-  db_esp_now_clients_list = db_espnow_broadcast_peers_list_create();
+  db_esp_now_clients_list = espnow_broadcast_peers_list_create();
   /* Init Queue for ESP-NOW internal callbacks when packet is finally sent or
    * received */
   db_espnow_send_recv_callback_queue =
@@ -741,8 +842,8 @@ db_espnow_init()
   /* Initialize ESP-NOW and register sending and receiving callback function.
    */
   ESP_ERROR_CHECK(esp_now_init());
-  ESP_ERROR_CHECK(esp_now_register_send_cb(db_espnow_send_callback));
-  ESP_ERROR_CHECK(esp_now_register_recv_cb(db_espnow_receive_callback));
+  ESP_ERROR_CHECK(esp_now_register_send_cb(espnow_send_callback));
+  ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_receive_callback));
 
   /* Add broadcast peer information to peer list. */
   esp_now_peer_info_t peer;
@@ -784,15 +885,8 @@ db_espnow_init()
   return ESP_OK;
 }
 
-/**
- * Send ESP-NOW DroneBridge for ESP32 internal telemetry packet containing RSSI
- * and noise floor info from GND to AIR. Used by AIR side to create a
- * RADIO_STATUS MAVLink message sent to GCS.
- * @return true when packet was scheduled for sending, false if it will not be
- * sent
- */
-bool
-db_espnow_schedule_internal_telemetry_packet()
+static bool
+espnow_schedule_internal_telemetry_packet()
 {
   if(DB_PARAM_RADIO_MODE != DB_WIFI_MODE_ESPNOW_GND) {
     // Only GND sends internal telemetry. This function was called wrongly
@@ -831,11 +925,7 @@ db_espnow_schedule_internal_telemetry_packet()
   }
 }
 
-/**
- *  Task that handles all ESP-NOW related data processing. Reads ESP-NOW
- * Callback-Queue, Reads ESP-NOW send queue and writes to UART-WRITE Queue.
- */
-_Noreturn void
+_Noreturn static void
 process_espnow_data()
 {
   esp_err_t err = db_espnow_init();
@@ -871,18 +961,18 @@ process_espnow_data()
         if(DB_PARAM_RADIO_MODE == DB_WIFI_MODE_ESPNOW_GND &&
            send_internal_telemetry_frame) {
           send_internal_telemetry_frame =
-            !db_espnow_schedule_internal_telemetry_packet();
+            !espnow_schedule_internal_telemetry_packet();
         }
         else {
           // try to immediately send the next packet if available and set
           // ready_to_send accordingly
-          ready_to_send = !db_read_uart_queue_and_send();
+          ready_to_send = !read_uart_queue_and_send();
         }
         break;
       }
       case DB_ESPNOW_RECV_CB: {
         db_espnow_event_recv_cb_t *recv_cb = &evt.info.recv_cb;
-        db_espnow_process_rcv_data(
+        espnow_process_rcv_data(
           recv_cb->data, recv_cb->data_len, recv_cb->mac_addr, recv_cb->rssi);
         free(recv_cb->data);
         break;
@@ -895,7 +985,7 @@ process_espnow_data()
     /* process UART -> ESP-NOW */
     if(ready_to_send) {
       // send the next packet if available and set ready_to_send accordingly
-      ready_to_send = !db_read_uart_queue_and_send();
+      ready_to_send = !read_uart_queue_and_send();
     }
     else {
       // do nothing - we are not ready for sending another packet
@@ -919,11 +1009,18 @@ process_espnow_data()
   vTaskDelete(NULL);
 }
 
-/**
- * Start task that handles ESP-NOW data
- */
+/******************************************************************************
+ * Public Function Definitions
+ ******************************************************************************/
+
 void
 db_start_espnow_module()
 {
-  xTaskCreate(&process_espnow_data, "db_espnow", 40960, NULL, 5, NULL);
+  xTaskCreate(&process_espnow_data, /**< Task function reference */
+              "db_espnow",          /**< Task name */
+              40960,                /**< Stack Size */
+              NULL,                 /**< Task Parameters (unused) */
+              5,                    /**< Task priority */
+              NULL                  /**< Task handle */
+  );
 }
